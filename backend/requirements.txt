@@ -1,0 +1,7 @@
+# Dependances de la couche Infrastructure (etape 4).
+# Les dependances de l'API (FastAPI, uvicorn...) seront ajoutees plus tard.
+
+gitpython==3.1.43        # clone des depots a analyser
+pymongo==4.8.0           # persistance des rapports
+langchain-ollama==0.1.3  # appel du LLM local via Ollama
+checkov==3.2.257         # analyse statique IaC (aussi utilisable en CLI seule)
