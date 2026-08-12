@@ -1,15 +1,19 @@
 """
 Client LLM — couche Infrastructure.
 
-Encapsule l'appel a Ollama via LangChain : envoi du prompt, reprise sur
-erreur et extraction du JSON contenu dans la reponse (les modeles locaux
+Encapsule l'appel a Google Gemini via LangChain : envoi du prompt, reprise
+sur erreur et extraction du JSON contenu dans la reponse (les modeles
 encadrent frequemment leur JSON de texte ou de balises markdown).
 
 Configuration (variables d'environnement) :
-    LLM_MODEL       : modele Ollama    (defaut "mistral")
-    OLLAMA_BASE_URL : URL du serveur   (defaut "http://localhost:11434")
+    GEMINI_API_KEY  : cle d'API Google AI Studio  (obligatoire)
+    LLM_MODEL       : modele Gemini               (defaut "gemini-3.5-flash")
+    LLM_TEMPERATURE : temperature du modele       (defaut 0.0)
 
-Dependance : langchain-ollama (ou langchain-community en repli).
+La temperature vaut 0 par defaut : on attend du modele un JSON structure
+et reproductible, pas de la creativite.
+
+Dependance : langchain-google-genai.
 L'import est tolerant pour que le module reste importable sans la
 dependance ; invoquer() renvoie alors "".
 """
@@ -20,45 +24,65 @@ import os
 import time
 
 try:
-    # Paquet dedie, recommande aujourd'hui.
-    from langchain_ollama import OllamaLLM as Ollama
-except ImportError:
-    try:
-        # Repli sur l'implementation historique de langchain-community.
-        from langchain_community.llms import Ollama
-    except ImportError:  # aucune des deux dependances n'est installee
-        Ollama = None
+    from langchain_google_genai import ChatGoogleGenerativeAI
+except ImportError:  # dependance absente : le module reste importable
+    ChatGoogleGenerativeAI = None
 
 logger = logging.getLogger(__name__)
 
 # Pause entre deux tentatives, en secondes.
 DELAI_RETRY = 1
 
+# Modele par defaut : la variante "flash" est la plus rapide et reste
+# accessible avec le quota gratuit d'AI Studio.
+#
+# Version figee volontairement, et non l'alias "gemini-flash-latest" :
+# un moteur de gouvernance doit rendre le meme verdict d'une analyse a
+# l'autre, ce qu'un alias qui glisse vers un nouveau modele ne garantit pas.
+# Les modeles 1.5 et 2.5 renvoient desormais 404 pour les nouveaux comptes.
+MODELE_DEFAUT = "gemini-3.5-flash"
+
 
 class LangChainClient:
-    """Dialogue avec un modele Ollama local."""
+    """Dialogue avec un modele Gemini via l'API Google AI Studio."""
 
     def __init__(self):
         """Initialise le modele a partir des variables d'environnement.
 
-        Aucune requete reseau n'est faite ici : une instance est creee
-        meme si le serveur Ollama n'est pas encore demarre.
+        Aucune requete reseau n'est faite ici : une instance est creee meme
+        si la cle est invalide, l'erreur ne remontera qu'au premier appel.
         """
-        self.model = os.environ.get("LLM_MODEL", "mistral")
-        self.base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        self.model = os.environ.get("LLM_MODEL", MODELE_DEFAUT)
+        self.api_key = os.environ.get("GEMINI_API_KEY", "")
+        self.temperature = self._temperature()
         self.llm = None
 
-        if Ollama is None:
+        if ChatGoogleGenerativeAI is None:
             logger.error(
-                "LangChain/Ollama n'est pas installe "
-                "(pip install langchain-ollama)"
+                "langchain-google-genai n'est pas installe "
+                "(pip install langchain-google-genai)"
+            )
+            return
+
+        # Sans cle, inutile de construire le client : chaque appel
+        # echouerait sur une erreur d'authentification.
+        if not self.api_key:
+            logger.error(
+                "GEMINI_API_KEY absente de l'environnement : "
+                "l'analyse LLM sera ignoree"
             )
             return
 
         try:
-            self.llm = Ollama(model=self.model, base_url=self.base_url)
+            self.llm = ChatGoogleGenerativeAI(
+                model=self.model,
+                google_api_key=self.api_key,
+                temperature=self.temperature,
+            )
             logger.info(
-                "Client LLM initialise : modele=%s url=%s", self.model, self.base_url
+                "Client LLM initialise : modele=%s temperature=%s",
+                self.model,
+                self.temperature,
             )
         except Exception as erreur:
             logger.error("Initialisation du client LLM impossible : %s", erreur)
@@ -66,9 +90,8 @@ class LangChainClient:
     def invoquer(self, prompt: str, retry: int = 3) -> str:
         """Envoie un prompt au LLM et retourne sa reponse brute.
 
-        Les modeles locaux echouent parfois de facon transitoire (serveur
-        occupe, modele en cours de chargement) : on retente `retry` fois
-        avec une pause d'une seconde.
+        L'API echoue parfois de facon transitoire (quota momentane, service
+        occupe) : on retente `retry` fois avec une pause d'une seconde.
 
         Args:
             prompt: le texte envoye au modele.
@@ -84,10 +107,7 @@ class LangChainClient:
         for tentative in range(1, retry + 1):
             try:
                 reponse = self.llm.invoke(prompt)
-                # Selon la version, invoke() rend une chaine ou un message.
-                if not isinstance(reponse, str):
-                    reponse = getattr(reponse, "content", str(reponse))
-                return reponse
+                return self._texte(reponse)
             except Exception as erreur:
                 logger.error(
                     "Echec de l'appel LLM (tentative %d/%d) : %s",
@@ -141,3 +161,51 @@ class LangChainClient:
             return {}
 
         return resultat
+
+    def _temperature(self) -> float:
+        """Lit la temperature dans l'environnement, 0.0 si elle est illisible."""
+        brute = os.environ.get("LLM_TEMPERATURE", "0")
+        try:
+            return float(brute)
+        except ValueError:
+            logger.warning(
+                "LLM_TEMPERATURE illisible ('%s') : repli sur 0.0", brute
+            )
+            return 0.0
+
+    def _texte(self, reponse) -> str:
+        """Normalise la reponse de LangChain en chaine de caracteres.
+
+        invoke() rend un AIMessage dont `content` est soit une chaine, soit
+        une liste de blocs typés selon la version de langchain-core. Les
+        deux formes sont ramenees a du texte.
+
+        Args:
+            reponse: la valeur rendue par llm.invoke().
+
+        Returns:
+            Le texte de la reponse, "" si elle n'en contient pas.
+        """
+        if isinstance(reponse, str):
+            return reponse
+
+        contenu = getattr(reponse, "content", None)
+
+        if isinstance(contenu, str):
+            return contenu
+
+        # Liste de blocs : on ne garde que les morceaux textuels.
+        if isinstance(contenu, list):
+            morceaux = []
+            for bloc in contenu:
+                if isinstance(bloc, str):
+                    morceaux.append(bloc)
+                elif isinstance(bloc, dict) and "text" in bloc:
+                    morceaux.append(str(bloc["text"]))
+            return "".join(morceaux)
+
+        if contenu is None:
+            logger.error("Reponse LLM sans contenu exploitable : %s", type(reponse))
+            return ""
+
+        return str(contenu)
