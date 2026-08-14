@@ -1,7 +1,38 @@
-# Dependances de la couche Infrastructure (etape 4).
-# Les dependances de l'API (FastAPI, uvicorn...) seront ajoutees plus tard.
+# Dependances du backend — AI Governance Engine.
+#
+# Versions epinglees sur celles reellement installees et testees dans le
+# venv du projet (pip show), et non sur des versions supposees : un
+# `pip install -r` doit reproduire l'environnement qui fonctionne.
 
-gitpython==3.1.43        # clone des depots a analyser
-pymongo==4.8.0           # persistance des rapports
-langchain-ollama==0.1.3  # appel du LLM local via Ollama
-checkov==3.2.257         # analyse statique IaC (aussi utilisable en CLI seule)
+# Web Framework
+fastapi==0.141.1
+uvicorn==0.52.3
+
+# LLM
+# langchain-google-genai tire lui-meme google-genai, le SDK Google actuel.
+# Le paquet google-generativeai (deprecie) n'est pas utilise par le projet.
+langchain-google-genai==4.3.3
+
+# Database
+pymongo==4.8.0
+
+# Git
+gitpython==3.1.43
+
+# Configuration
+python-dotenv==1.2.2
+
+# Data validation
+pydantic==2.13.4
+
+# YAML parsing
+# Le parsing HCL (Terraform) est assure par Checkov via son propre fork
+# bc-python-hcl2 : ne pas ajouter python-hcl2, qui fournirait un second
+# module "hcl2" concurrent.
+pyyaml==6.0.3
+
+# DevOps analysis
+checkov==3.2.257
+
+# Utilities
+requests==2.34.2
