@@ -65,44 +65,63 @@ class ExplainViolations:
         self._charger_env()
         self.llm = LangChainClient()
 
-    def executer(self, violations: list) -> list:
+    def executer(self, violations: list, max_violations: int = 50) -> list:
         """Enrichit chaque violation d'une explication et d'une correction.
+
+        L'enrichissement coute un appel LLM par violation. Sur un depot
+        tres degrade, la note est deja au plancher bien avant la centieme
+        violation : payer l'explication de toutes n'apporte rien et epuise
+        le quota. Au-dela de `max_violations`, seules les premieres sont
+        enrichies, les autres gardent leurs champs vides.
 
         Args:
             violations: violations dedupliquees a enrichir. Les objets sont
                 modifies sur place.
+            max_violations: nombre maximal de violations enrichies.
 
         Returns:
-            La meme liste, chaque violation ayant desormais ses champs
-            explication et correction renseignes.
+            La meme liste, complete. Les violations au-dela de la limite y
+            figurent avec leurs champs explication et correction vides.
         """
         if not violations:
             return violations
 
         total = len(violations)
+        a_traiter = violations
+
+        if total > max_violations:
+            logger.warning(
+                "%d violations détectées — enrichissement limité à %d "
+                "pour économiser le quota LLM",
+                total,
+                max_violations,
+            )
+            a_traiter = violations[:max_violations]
+
+        retenues = len(a_traiter)
 
         # Un seul message si le LLM est absent, plutot qu'une erreur par
         # violation : le traitement continue avec les textes par defaut.
         # Seules les violations non enrichies sont concernees.
         if self.llm.llm is None:
-            a_enrichir = sum(1 for v in violations if not v.explication)
+            a_enrichir = sum(1 for v in a_traiter if not v.explication)
             if a_enrichir:
                 logger.error(
                     "LLM indisponible : %d violation(s) sur %d recevront le "
                     "texte par defaut",
                     a_enrichir,
-                    total,
+                    retenues,
                 )
 
-        for index, violation in enumerate(violations, start=1):
+        for index, violation in enumerate(a_traiter, start=1):
             # Deja enrichie (reprise d'analyse, cache) : rien a refaire.
             if violation.explication:
                 logger.debug(
-                    "Explication %d/%d ignoree (deja renseignee)", index, total
+                    "Explication %d/%d ignoree (deja renseignee)", index, retenues
                 )
                 continue
 
-            logger.info("Explication %d/%d", index, total)
+            logger.info("Explication %d/%d", index, retenues)
             self._enrichir(violation)
 
         return violations

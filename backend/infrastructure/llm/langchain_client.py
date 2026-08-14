@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 # Pause entre deux tentatives, en secondes.
 DELAI_RETRY = 1
 
+# Signatures d'un quota epuise dans le message d'erreur de l'API.
+# Contrairement a une panne passagere, ce refus ne se resoudra pas en
+# quelques secondes : le retenter ne fait que perdre du temps.
+SIGNATURES_QUOTA = ("429", "RESOURCE_EXHAUSTED", "quota")
+
 # Modele par defaut : la variante "flash" est la plus rapide et reste
 # accessible avec le quota gratuit d'AI Studio.
 #
@@ -90,8 +95,15 @@ class LangChainClient:
     def invoquer(self, prompt: str, retry: int = 3) -> str:
         """Envoie un prompt au LLM et retourne sa reponse brute.
 
-        L'API echoue parfois de facon transitoire (quota momentane, service
-        occupe) : on retente `retry` fois avec une pause d'une seconde.
+        L'API echoue parfois de facon transitoire (service occupe, modele
+        en cours de chargement) : on retente `retry` fois avec une pause
+        d'une seconde.
+
+        Un quota epuise est traite a part : il ne se resoudra pas dans la
+        seconde, et une analyse porte sur des centaines de fichiers. Le
+        client se desactive alors definitivement, ce qui evite des
+        milliers d'appels voues a l'echec. L'analyse se poursuit sans LLM,
+        sur les seuls analyseurs deterministes.
 
         Args:
             prompt: le texte envoye au modele.
@@ -109,6 +121,15 @@ class LangChainClient:
                 reponse = self.llm.invoke(prompt)
                 return self._texte(reponse)
             except Exception as erreur:
+                if self._est_quota_epuise(erreur):
+                    logger.warning(
+                        "Quota Gemini épuisé — LLM désactivé pour cette analyse"
+                    )
+                    # Desactivation definitive : les appels suivants
+                    # sortiront immediatement sur le test de self.llm.
+                    self.llm = None
+                    break
+
                 logger.error(
                     "Echec de l'appel LLM (tentative %d/%d) : %s",
                     tentative,
@@ -117,8 +138,9 @@ class LangChainClient:
                 )
                 if tentative < retry:
                     time.sleep(DELAI_RETRY)
+        else:
+            logger.error("Appel LLM abandonne apres %d tentatives", retry)
 
-        logger.error("Appel LLM abandonne apres %d tentatives", retry)
         return ""
 
     def extraire_json(self, texte: str) -> dict:
@@ -161,6 +183,22 @@ class LangChainClient:
             return {}
 
         return resultat
+
+    def _est_quota_epuise(self, erreur: Exception) -> bool:
+        """Indique si une erreur d'appel traduit un quota epuise.
+
+        La detection se fait sur le texte du message : l'exception remontee
+        par langchain-google-genai enveloppe la reponse HTTP sans exposer
+        le code de statut sous forme exploitable.
+
+        Args:
+            erreur: l'exception levee par l'appel au modele.
+
+        Returns:
+            True si le message porte une signature de quota epuise.
+        """
+        message = str(erreur)
+        return any(signature in message for signature in SIGNATURES_QUOTA)
 
     def _temperature(self) -> float:
         """Lit la temperature dans l'environnement, 0.0 si elle est illisible."""
