@@ -1,0 +1,25 @@
+# Exclusions du contexte de build Docker.
+#
+# Docker ne lit pas .gitignore : sans ce fichier, le "COPY . ." du
+# Dockerfile ecraserait les node_modules installes dans l'image par ceux
+# de la machine hote. Ce n'est pas qu'une question de taille : l'hote
+# tourne sous glibc, l'image sous Alpine/musl. Les binaires natifs
+# d'esbuild et de rollup sont incompatibles entre les deux, et le
+# "npm run build" echouerait avec une erreur de plateforme.
+node_modules
+
+# Build precedent : regenere dans l'image, inutile de le transporter.
+dist
+
+# Sans objet dans l'image.
+.git
+.gitignore
+Dockerfile
+.dockerignore
+README.md
+
+# Variables locales : la configuration de l'image passe par --build-arg.
+.env
+.env.*
+
+npm-debug.log*

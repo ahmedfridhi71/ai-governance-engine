@@ -1,0 +1,94 @@
+# Pile complete — AI Governance Engine.
+#
+#     docker compose up --build
+#
+# Point d'entree : http://localhost (nginx). Les ports 8000 et 3000 sont
+# aussi publies pour pouvoir joindre chaque service directement pendant
+# la mise au point.
+#
+# Compose lit les variables ${...} dans le fichier .env place A LA RACINE
+# du projet (pas backend/.env). Il doit au minimum contenir :
+#     GEMINI_API_KEY=...
+
+services:
+
+  # --- Base de donnees -------------------------------------------------------
+  mongodb:
+    image: mongo:6.0
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      # Le port s'ouvre bien avant que la base accepte des requetes :
+      # un ping applicatif est le seul signal fiable de disponibilite.
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # --- API -------------------------------------------------------------------
+  backend:
+    build: ./backend
+    depends_on:
+      mongodb:
+        # Attend le healthcheck, pas seulement le demarrage du conteneur.
+        condition: service_healthy
+    environment:
+      # "mongodb" est le nom du service, resolu par le DNS du reseau Docker.
+      - MONGODB_URL=mongodb://mongodb:27017
+      - DB_NAME=ai_governance
+      # Ces valeurs priment sur backend/.env embarque dans l'image :
+      # load_dotenv y est appele avec override=False.
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LLM_MODEL=${LLM_MODEL:-gemini-3.5-flash}
+    volumes:
+      # Les depots clones atterrissent dans /tmp/governance_<empreinte>.
+      # Le montage les rend visibles depuis l'hote et evite de regonfler
+      # la couche inscriptible du conteneur a chaque analyse.
+      - /tmp:/tmp
+    ports:
+      - "8000:8000"
+    healthcheck:
+      # curl est absent de python:3.11-slim : on interroge l'API avec
+      # l'interpreteur, qui lui est forcement present.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # --- Interface web ---------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # URL relative : le navigateur passe par nginx, qui route /api/
+        # vers le backend. Vite fige cette valeur dans le bundle au build,
+        # elle ne peut pas etre changee au demarrage du conteneur.
+        VITE_API_URL: /api/v1
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+
+  # --- Reverse proxy ---------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    volumes:
+      # Monte comme configuration de site : le fichier est un bloc
+      # "server" seul, il n'a ni "events" ni "http".
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - frontend
+      - backend
+
+volumes:
+  mongo_data:
