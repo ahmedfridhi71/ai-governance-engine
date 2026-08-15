@@ -1,0 +1,14 @@
+/*
+ * Mise en page racine.
+ *
+ * La colonne de contenu et la barre de navigation sont gerees dans
+ * App.jsx : #root ne fait que remplir la largeur disponible.
+ *
+ * Les regles de demonstration du gabarit Vite (.logo, .card,
+ * .read-the-docs, animation logo-spin) ont ete retirees : plus rien ne
+ * les utilise depuis la reecriture d'App.jsx.
+ */
+
+#root {
+  width: 100%;
+}
