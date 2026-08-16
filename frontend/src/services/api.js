@@ -16,9 +16,10 @@ import axios from 'axios'
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'
 
 // Une analyse enchaine un clone, Checkov et des dizaines d'appels LLM :
-// elle se compte en minutes. 5 minutes, la ou axios ne mettrait aucune
-// limite par defaut.
-const TIMEOUT_MS = 300000
+// elle se compte en minutes. 30 minutes, la ou axios ne mettrait aucune
+// limite par defaut. Doit rester aligne sur les proxy_*_timeout de
+// nginx/nginx.conf : la limite la plus courte des deux l'emporte.
+const TIMEOUT_MS = 1800000
 
 const api = axios.create({
   baseURL: API_BASE_URL,

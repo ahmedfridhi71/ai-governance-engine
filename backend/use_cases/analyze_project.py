@@ -438,6 +438,8 @@ class AnalyzeProject:
     def _analyser_llm_complexe(self, fp) -> list:
         """Demande au LLM les seules violations que les regex ne voient pas.
 
+        Rend [] sans aucun appel si le LLM est indisponible.
+
         Args:
             fp: le FichierProjet a analyser.
 
@@ -450,6 +452,7 @@ class AnalyzeProject:
         """Demande au LLM un passage sur les 10 Golden Rules.
 
         Utilise pour les fichiers qu'aucun analyseur deterministe ne couvre.
+        Rend [] sans aucun appel si le LLM est indisponible.
 
         Args:
             fp: le FichierProjet a analyser.
@@ -458,6 +461,18 @@ class AnalyzeProject:
             Les violations remontees par le LLM, toutes regles confondues.
         """
         return self._interroger_llm(fp, PROMPT_COMPLET, REGLES_TOUTES)
+
+    def _llm_disponible(self) -> bool:
+        """Indique si le client LLM peut encore etre interroge.
+
+        Le client se met lui-meme hors service dans deux cas : cle absente
+        au demarrage, ou quota epuise en cours d'analyse. Dans les deux cas
+        son modele interne passe a None.
+
+        Returns:
+            True si un appel a une chance d'aboutir.
+        """
+        return self.llm is not None and self.llm.llm is not None
 
     def _interroger_llm(self, fp, gabarit: str, regles_autorisees) -> list:
         """Envoie le fichier au LLM, morceau par morceau, et lit sa reponse.
@@ -471,6 +486,14 @@ class AnalyzeProject:
             Les violations valides extraites de la reponse, [] si le LLM
             est indisponible ou si sa reponse est inexploitable.
         """
+        # Sortie seche avant toute preparation. Sans ce test, chaque fichier
+        # paierait la construction du prompt puis trois tentatives espacees
+        # d'une seconde, pour un client qu'on sait deja hors service — six
+        # secondes perdues par fichier, plusieurs minutes sur un depot reel.
+        if not self._llm_disponible():
+            logger.debug("LLM indisponible, analyse LLM ignoree : %s", fp.chemin)
+            return []
+
         violations = []
 
         for morceau in self._morceaux(fp):

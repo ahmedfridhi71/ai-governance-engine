@@ -31,6 +31,14 @@ services:
   # --- API -------------------------------------------------------------------
   backend:
     build: ./backend
+    # Remplace le CMD de l'image pour allonger le maintien des connexions
+    # inactives : une analyse peut laisser la connexion silencieuse
+    # longtemps avant que la reponse n'arrive.
+    command: >
+      uvicorn backend.main:app
+      --host 0.0.0.0
+      --port 8000
+      --timeout-keep-alive 1800
     depends_on:
       mongodb:
         # Attend le healthcheck, pas seulement le demarrage du conteneur.
