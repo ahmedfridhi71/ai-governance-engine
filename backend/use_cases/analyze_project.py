@@ -215,7 +215,13 @@ class AnalyzeProject:
         """
         violations = []
 
-        for resultat in self.checkov.analyser_fichier(fp.chemin):
+        # Checkov relit le fichier sur le disque, depuis un sous-processus
+        # dont le repertoire de travail n'a rien a voir avec le depot
+        # clone : il lui faut le chemin absolu. Repli sur `chemin` pour les
+        # FichierProjet construits sans acces disque (tests).
+        cible = fp.chemin_absolu or fp.chemin
+
+        for resultat in self.checkov.analyser_fichier(cible):
             check_id = resultat.get("check_id", "")
             regle_id = mapper_check_id(check_id)
 

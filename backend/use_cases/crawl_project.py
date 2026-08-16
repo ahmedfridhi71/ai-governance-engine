@@ -90,13 +90,22 @@ class CrawlProject:
                     taille = len(contenu.encode("utf-8", errors="ignore"))
 
                 type_fichier = detecter_type(nom, extension, contenu)
+
+                # Deux chemins, deux usages :
+                #   chemin         -> affichage dans le rapport, relatif a
+                #                     la racine du depot.
+                #   chemin_absolu  -> relecture du fichier sur le disque,
+                #                     notamment par Checkov, qui tourne en
+                #                     sous-processus depuis un autre
+                #                     repertoire de travail.
                 resultat[type_fichier].append(
                     FichierProjet(
-                        chemin=chemin,
+                        chemin=os.path.relpath(chemin, chemin_projet),
                         nom=nom,
                         type_fichier=type_fichier,
                         contenu=contenu,
                         taille=taille,
+                        chemin_absolu=chemin,
                     )
                 )
 

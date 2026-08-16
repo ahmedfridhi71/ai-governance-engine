@@ -46,7 +46,12 @@ class CheckovAnalyzer:
         """
         violations = []
 
-        for resultat in self.client.analyser_fichier(fichier.chemin):
+        # Chemin absolu : Checkov relit le fichier depuis un sous-processus
+        # dont le repertoire de travail differe de celui du depot clone.
+        # `chemin`, lui, est relatif et ne sert qu'a l'affichage.
+        cible = fichier.chemin_absolu or fichier.chemin
+
+        for resultat in self.client.analyser_fichier(cible):
             check_id = resultat.get("check_id", "")
             regle_id = mapper_check_id(check_id)
 
