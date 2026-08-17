@@ -471,14 +471,34 @@ class AnalyzeProject:
     def _llm_disponible(self) -> bool:
         """Indique si le client LLM peut encore etre interroge.
 
-        Le client se met lui-meme hors service dans deux cas : cle absente
-        au demarrage, ou quota epuise en cours d'analyse. Dans les deux cas
-        son modele interne passe a None.
+        Trois situations mettent le modele interne a None, et elles
+        n'appellent pas la meme reponse :
+
+          - pas de client du tout : rien a tenter ;
+          - quota epuise : la cle est bonne, c'est le credit qui manque.
+            Reessayer relancerait les appels en boucle que la desactivation
+            cherchait a eviter ;
+          - client jamais configure alors que la cle est desormais dans
+            l'environnement : le client sait se reconstruire au premier
+            appel, il faut donc le laisser essayer.
 
         Returns:
             True si un appel a une chance d'aboutir.
         """
-        return self.llm is not None and self.llm.llm is not None
+        if self.llm is None:
+            return False
+
+        # Quota epuise : definitif pour cette instance.
+        if getattr(self.llm, "quota_epuise", False):
+            return False
+
+        if self.llm.llm is None:
+            # Cle apparue depuis la construction du client (.env charge
+            # apres coup, variable posee par l'orchestrateur) : invoquer()
+            # se reinitialisera tout seul.
+            return bool(os.environ.get("GEMINI_API_KEY", "").strip())
+
+        return True
 
     def _interroger_llm(self, fp, gabarit: str, regles_autorisees) -> list:
         """Envoie le fichier au LLM, morceau par morceau, et lit sa reponse.

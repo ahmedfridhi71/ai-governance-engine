@@ -57,17 +57,40 @@ class LangChainClient:
         Aucune requete reseau n'est faite ici : une instance est creee meme
         si la cle est invalide, l'erreur ne remontera qu'au premier appel.
         """
-        self.model = os.environ.get("LLM_MODEL", MODELE_DEFAUT)
-        self.api_key = os.environ.get("GEMINI_API_KEY", "")
-        self.temperature = self._temperature()
+        self.model = MODELE_DEFAUT
+        self.api_key = ""
+        self.temperature = 0.0
         self.llm = None
 
+        # Distingue les deux raisons d'avoir self.llm a None : "pas encore
+        # configure" (recuperable) et "quota epuise" (definitif). Sans ce
+        # drapeau, la reinitialisation paresseuse d'invoquer() annulerait la
+        # protection contre les appels en boucle sur un quota epuise.
+        self.quota_epuise = False
+
+        self._construire()
+
+    def _construire(self) -> bool:
+        """(Re)lit l'environnement et construit le modele.
+
+        Appelee au demarrage, puis a nouveau par invoquer() si la cle
+        n'etait pas encore disponible a ce moment-la — cas d'un .env charge
+        apres la construction du client.
+
+        Returns:
+            True si le modele est pret a etre interroge.
+        """
         if ChatGoogleGenerativeAI is None:
             logger.error(
                 "langchain-google-genai n'est pas installe "
                 "(pip install langchain-google-genai)"
             )
-            return
+            return False
+
+        # Relecture systematique : c'est tout l'interet d'un second appel.
+        self.model = os.environ.get("LLM_MODEL", MODELE_DEFAUT)
+        self.api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        self.temperature = self._temperature()
 
         # Sans cle, inutile de construire le client : chaque appel
         # echouerait sur une erreur d'authentification.
@@ -76,7 +99,7 @@ class LangChainClient:
                 "GEMINI_API_KEY absente de l'environnement : "
                 "l'analyse LLM sera ignoree"
             )
-            return
+            return False
 
         try:
             self.llm = ChatGoogleGenerativeAI(
@@ -89,8 +112,10 @@ class LangChainClient:
                 self.model,
                 self.temperature,
             )
+            return True
         except Exception as erreur:
             logger.error("Initialisation du client LLM impossible : %s", erreur)
+            return False
 
     def invoquer(self, prompt: str, retry: int = 3) -> str:
         """Envoie un prompt au LLM et retourne sa reponse brute.
@@ -112,8 +137,7 @@ class LangChainClient:
         Returns:
             La reponse du modele, ou "" si toutes les tentatives echouent.
         """
-        if self.llm is None:
-            logger.error("Appel LLM impossible : client non initialise")
+        if self.llm is None and not self._reactiver():
             return ""
 
         for tentative in range(1, retry + 1):
@@ -126,7 +150,9 @@ class LangChainClient:
                         "Quota Gemini épuisé — LLM désactivé pour cette analyse"
                     )
                     # Desactivation definitive : les appels suivants
-                    # sortiront immediatement sur le test de self.llm.
+                    # sortiront immediatement sur le test de self.llm, et le
+                    # drapeau empeche _reactiver() de reconstruire le client.
+                    self.quota_epuise = True
                     self.llm = None
                     break
 
@@ -183,6 +209,34 @@ class LangChainClient:
             return {}
 
         return resultat
+
+    def _reactiver(self) -> bool:
+        """Tente de reconstruire le client si la cle est apparue depuis.
+
+        Le client peut avoir ete cree avant le chargement du .env, ou avant
+        qu'un orchestrateur ne renseigne l'environnement. Plutot que de
+        rester defintivement muet, on relit GEMINI_API_KEY au moment de
+        l'appel.
+
+        Un quota epuise n'est pas concerne : la cle est bien la, c'est le
+        credit qui manque. Reconstruire le client relancerait les appels en
+        boucle que la desactivation cherchait justement a eviter.
+
+        Returns:
+            True si le client est desormais utilisable.
+        """
+        if self.quota_epuise:
+            logger.debug("Appel LLM ignore : quota epuise sur cette instance")
+            return False
+
+        # Test direct de l'environnement, avant _construire() : sans cle,
+        # inutile de journaliser une erreur a chaque fichier analyse.
+        if not os.environ.get("GEMINI_API_KEY", "").strip():
+            logger.debug("Appel LLM impossible : GEMINI_API_KEY toujours absente")
+            return False
+
+        logger.info("GEMINI_API_KEY disponible : reinitialisation du client LLM")
+        return self._construire()
 
     def _est_quota_epuise(self, erreur: Exception) -> bool:
         """Indique si une erreur d'appel traduit un quota epuise.
