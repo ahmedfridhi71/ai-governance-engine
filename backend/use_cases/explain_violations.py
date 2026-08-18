@@ -11,10 +11,20 @@ rapport utile a un developpeur :
 Il intervient apres la deduplication : enrichir des doublons couterait
 autant d'appels LLM inutiles.
 
+L'enrichissement se fait PAR REGLE, pas par violation. Les cinquante
+"dependance sans version figee" d'un depot appellent la meme explication
+et la meme correction : les demander cinquante fois epuiserait le quota
+sans rien apporter. Une analyse coute donc au plus dix appels, un par
+Golden Rule, quel que soit le nombre de violations.
+
+Le texte produit vaut pour toute la regle et ne cite aucun fichier
+precis : le detail par fichier reste porte par le champ `probleme` de
+chaque violation.
+
 Le LLM n'est jamais bloquant. Si le service est indisponible ou si sa
-reponse est inexploitable, la violation recoit un texte par defaut et
-reste presente dans le rapport : un constat sans explication vaut mieux
-qu'une violation perdue.
+reponse est inexploitable, les violations du groupe recoivent un texte
+par defaut et restent presentes dans le rapport : un constat sans
+explication vaut mieux qu'une violation perdue.
 """
 
 import logging
@@ -36,13 +46,37 @@ CHEMIN_ENV = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
 )
 
+# Nombre maximal d'appels LLM par analyse. Le referentiel compte dix
+# Golden Rules : au-dela, c'est qu'un analyseur remonte des identifiants
+# inattendus.
+MAX_APPELS = 10
+
+# Nombre d'exemples de fichiers cites au LLM pour situer le contexte.
+EXEMPLES_FICHIERS = 3
+
+# Ordre de traitement des groupes : les regles critiques d'abord. Si le
+# quota s'epuise en cours de route, ce sont les violations les plus graves
+# qui auront ete expliquees, pas celles arrivees en tete par hasard.
+ORDRE_SEVERITE = {"critique": 0, "warning": 1}
+
+# Severite inattendue : traitee en dernier, apres tout ce qui est connu.
+SEVERITE_INCONNUE = 2
+
 # Gabarit du prompt. Les accolades du JSON attendu sont doublees :
 # ce gabarit passe par str.format().
+#
+# Le prompt demande explicitement un texte valable pour tous les fichiers
+# concernes : la reponse sera recopiee sur chaque violation du groupe, elle
+# ne doit donc pas s'appuyer sur un fichier en particulier.
 PROMPT_EXPLICATION = """
 Tu es un expert en gouvernance IT.
-Fichier : {fichier}
 Regle violee : {regle_nom}
-Probleme : {probleme}
+Probleme constate : {probleme}
+Nombre de fichiers concernes : {nombre}
+Exemples de fichiers : {fichiers}
+
+Ton explication et ta correction doivent valoir pour TOUS les fichiers
+concernes : ne cite aucun fichier en particulier.
 
 Reponds UNIQUEMENT avec ce JSON :
 {{
@@ -65,77 +99,137 @@ class ExplainViolations:
         self._charger_env()
         self.llm = LangChainClient()
 
-    def executer(self, violations: list, max_violations: int = 50) -> list:
-        """Enrichit chaque violation d'une explication et d'une correction.
+    def executer(self, violations: list, max_appels: int = MAX_APPELS) -> list:
+        """Enrichit toutes les violations, a raison d'un appel LLM par regle.
 
-        L'enrichissement coute un appel LLM par violation. Sur un depot
-        tres degrade, la note est deja au plancher bien avant la centieme
-        violation : payer l'explication de toutes n'apporte rien et epuise
-        le quota. Au-dela de `max_violations`, seules les premieres sont
-        enrichies, les autres gardent leurs champs vides.
+        Les violations sont regroupees par `regle_id` : un seul appel par
+        groupe, dont la reponse est recopiee sur chaque violation. Un depot
+        a 849 violations reparties sur dix regles coute donc dix appels, la
+        ou l'enrichissement violation par violation en coutait 849 et
+        epuisait le quota des la cinquantieme.
 
         Args:
             violations: violations dedupliquees a enrichir. Les objets sont
                 modifies sur place.
-            max_violations: nombre maximal de violations enrichies.
+            max_appels: nombre maximal d'appels LLM, donc de regles
+                enrichies.
 
         Returns:
-            La meme liste, complete. Les violations au-dela de la limite y
-            figurent avec leurs champs explication et correction vides.
+            La meme liste, complete et enrichie.
         """
         if not violations:
             return violations
 
-        total = len(violations)
-        a_traiter = violations
+        # Une violation deja renseignee (reprise d'analyse, cache) ne
+        # declenche aucun appel et n'entre dans aucun groupe.
+        a_enrichir = [v for v in violations if not v.explication]
+        if not a_enrichir:
+            logger.debug("Toutes les violations sont deja enrichies")
+            return violations
 
-        if total > max_violations:
-            logger.warning(
-                "%d violations détectées — enrichissement limité à %d "
-                "pour économiser le quota LLM",
-                total,
-                max_violations,
-            )
-            a_traiter = violations[:max_violations]
-
-        retenues = len(a_traiter)
+        groupes = self._grouper(a_enrichir)
+        regles = self._retenir(groupes, max_appels)
 
         # Un seul message si le LLM est absent, plutot qu'une erreur par
-        # violation : le traitement continue avec les textes par defaut.
-        # Seules les violations non enrichies sont concernees.
+        # groupe : le traitement continue avec les textes par defaut.
         if self.llm.llm is None:
-            a_enrichir = sum(1 for v in a_traiter if not v.explication)
-            if a_enrichir:
-                logger.error(
-                    "LLM indisponible : %d violation(s) sur %d recevront le "
-                    "texte par defaut",
-                    a_enrichir,
-                    retenues,
-                )
+            logger.error(
+                "LLM indisponible : %d violation(s) recevront le texte "
+                "par defaut",
+                len(a_enrichir),
+            )
 
-        for index, violation in enumerate(a_traiter, start=1):
-            # Deja enrichie (reprise d'analyse, cache) : rien a refaire.
-            if violation.explication:
-                logger.debug(
-                    "Explication %d/%d ignoree (deja renseignee)", index, retenues
-                )
-                continue
+        for index, regle_id in enumerate(regles, start=1):
+            groupe = groupes[regle_id]
+            logger.info(
+                "Explication %d/%d — regle %s (%d violation(s))",
+                index,
+                len(regles),
+                regle_id,
+                len(groupe),
+            )
+            self._enrichir_groupe(groupe)
 
-            logger.info("Explication %d/%d", index, retenues)
-            self._enrichir(violation)
-
+        logger.info(
+            "Enrichissement termine : %d violation(s) couvertes en %d appel(s)",
+            sum(len(groupes[r]) for r in regles),
+            len(regles),
+        )
         return violations
 
-    def _enrichir(self, violation) -> None:
-        """Renseigne explication et correction sur une violation.
+    def _grouper(self, violations: list) -> dict:
+        """Regroupe les violations par identifiant de Golden Rule.
 
         Args:
-            violation: la Violation a completer, modifiee sur place.
+            violations: les violations a enrichir.
+
+        Returns:
+            Un dict {regle_id: [violations]}, dans l'ordre de premiere
+            apparition.
         """
+        groupes = {}
+        for violation in violations:
+            groupes.setdefault(violation.regle_id, []).append(violation)
+        return groupes
+
+    def _retenir(self, groupes: dict, max_appels: int) -> list:
+        """Ordonne les regles a enrichir et applique le budget d'appels.
+
+        Les groupes critiques passent avant les warnings, et a severite
+        egale les plus nombreux d'abord. Cet ordre n'a rien de cosmetique :
+        si le quota LLM s'epuise en cours d'analyse, les violations restees
+        sans explication seront les moins graves.
+
+        Le referentiel ne comptant que dix regles, la troncature n'arrive
+        que si un analyseur remonte des identifiants inattendus.
+
+        Args:
+            groupes: les groupes de violations, par regle.
+            max_appels: budget d'appels LLM.
+
+        Returns:
+            Les identifiants de regle a traiter, dans l'ordre de traitement.
+        """
+        def cle_de_tri(regle_id):
+            groupe = groupes[regle_id]
+            severite = groupe[0].severite
+            # Effectif negatif : le plus grand groupe passe en premier a
+            # severite egale.
+            return (
+                ORDRE_SEVERITE.get(severite, SEVERITE_INCONNUE),
+                -len(groupe),
+            )
+
+        ordre = sorted(groupes, key=cle_de_tri)
+
+        if len(ordre) <= max_appels:
+            return ordre
+
+        logger.warning(
+            "%d regles violees pour %d appel(s) LLM autorise(s) : "
+            "les regles les moins graves ne seront pas expliquees",
+            len(ordre),
+            max_appels,
+        )
+        return ordre[:max_appels]
+
+    def _enrichir_groupe(self, groupe: list) -> None:
+        """Interroge le LLM une fois et applique sa reponse a tout le groupe.
+
+        Args:
+            groupe: violations partageant la meme Golden Rule, modifiees
+                sur place.
+        """
+        # Le premier element sert de specimen : meme regle, donc meme
+        # nature de probleme pour tout le groupe.
+        exemple = groupe[0]
+        fichiers = [v.fichier for v in groupe[:EXEMPLES_FICHIERS]]
+
         prompt = PROMPT_EXPLICATION.format(
-            fichier=violation.fichier,
-            regle_nom=violation.regle_nom,
-            probleme=violation.probleme,
+            regle_nom=exemple.regle_nom,
+            probleme=exemple.probleme,
+            nombre=len(groupe),
+            fichiers=", ".join(fichiers),
         )
 
         donnees = self.llm.extraire_json(self.llm.invoquer(prompt))
@@ -145,14 +239,18 @@ class ExplainViolations:
 
         if not explication or not correction:
             logger.warning(
-                "Enrichissement LLM incomplet pour %s (regle %s) : "
-                "repli sur le texte par defaut",
-                violation.fichier,
-                violation.regle_id,
+                "Enrichissement LLM incomplet pour la regle %s "
+                "(%d violation(s)) : repli sur le texte par defaut",
+                exemple.regle_id,
+                len(groupe),
             )
 
-        violation.explication = explication or f"Violation de {violation.regle_nom}"
-        violation.correction = correction or "Corriger selon bonnes pratiques"
+        explication = explication or f"Violation de {exemple.regle_nom}"
+        correction = correction or "Corriger selon bonnes pratiques"
+
+        for violation in groupe:
+            violation.explication = explication
+            violation.correction = correction
 
     def _champ(self, donnees: dict, cle: str) -> str:
         """Lit un champ texte de la reponse du LLM.
