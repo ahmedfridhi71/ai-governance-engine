@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import time
 
 from ..domain.constants import get_rule_by_id, mapper_check_id, NON_MAPPE
 from ..domain.entities import Violation
@@ -41,6 +42,16 @@ SEUIL_DECOUPAGE = 1024 * 1024
 # Garde-fou : un fichier de 5 Mo donnerait 2500 morceaux, donc 2500 appels
 # LLM. On plafonne le nombre de morceaux analyses par fichier.
 MAX_MORCEAUX = 20
+
+# Pause avant chaque appel, en secondes. Le palier gratuit de Gemini
+# plafonne a une quinzaine de requetes par minute ; quatre secondes entre
+# deux appels maintiennent le debit sous cette limite.
+#
+# Le cout est reel : un appel par fichier, donc quatre secondes par fichier
+# ajoutees a l'analyse. Sur un gros depot cela se compte en minutes, mais
+# c'est le prix d'une analyse qui aboutit au lieu d'un quota epuise des les
+# premieres dizaines de fichiers.
+PAUSE_ENTRE_APPELS = 4
 
 # --- Regex de l'analyseur Python custom -------------------------------------
 # Toutes en re.MULTILINE : les patterns raisonnent ligne par ligne.
@@ -523,6 +534,18 @@ class AnalyzeProject:
         violations = []
 
         for morceau in self._morceaux(fp):
+            # Le quota peut tomber entre deux morceaux d'un meme fichier :
+            # inutile d'attendre puis d'appeler un client hors service.
+            if not self._llm_disponible():
+                logger.debug("LLM devenu indisponible, morceaux restants ignores")
+                break
+
+            # Lissage du debit, avant l'appel et non apres : c'est
+            # l'espacement entre deux requetes qui compte, y compris entre
+            # le dernier appel du fichier precedent et le premier de
+            # celui-ci.
+            time.sleep(PAUSE_ENTRE_APPELS)
+
             prompt = gabarit.format(nom=fp.nom, contenu=morceau)
             reponse = self.llm.invoquer(prompt)
 

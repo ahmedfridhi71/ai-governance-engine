@@ -29,6 +29,7 @@ explication vaut mieux qu'une violation perdue.
 
 import logging
 import os
+import time
 
 from ..domain.constants import get_rule_by_id
 from ..infrastructure.llm.langchain_client import LangChainClient
@@ -51,6 +52,12 @@ CHEMIN_ENV = os.path.join(
 # Golden Rules : au-dela, c'est qu'un analyseur remonte des identifiants
 # inattendus.
 MAX_APPELS = 10
+
+# Pause entre deux appels, en secondes. Le palier gratuit de Gemini plafonne
+# a une quinzaine de requetes par minute : une seconde de plus que les
+# quatre strictement necessaires eviterait de justesse le refus, quatre
+# suffisent et laissent une marge sur la duree des appels eux-memes.
+PAUSE_ENTRE_APPELS = 4
 
 # Separateur employe par les analyseurs entre le constat generique et son
 # illustration : "dependance sans version figee : fastapi".
@@ -155,6 +162,13 @@ class ExplainViolations:
                 len(groupe),
             )
             self._enrichir_groupe(groupe)
+
+            # Lissage du debit. Deux cas ne meritent aucune attente : le
+            # dernier groupe, puisque plus rien ne suit, et un client passe
+            # hors service (quota epuise, cle absente) qui n'a lance aucune
+            # requete — patienter 4 secondes par groupe n'y changerait rien.
+            if index < len(regles) and self.llm.llm is not None:
+                time.sleep(PAUSE_ENTRE_APPELS)
 
         logger.info(
             "Enrichissement termine : %d violation(s) couvertes en %d appel(s)",
