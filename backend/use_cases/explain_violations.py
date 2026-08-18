@@ -30,6 +30,7 @@ explication vaut mieux qu'une violation perdue.
 import logging
 import os
 
+from ..domain.constants import get_rule_by_id
 from ..infrastructure.llm.langchain_client import LangChainClient
 
 try:
@@ -51,8 +52,9 @@ CHEMIN_ENV = os.path.join(
 # inattendus.
 MAX_APPELS = 10
 
-# Nombre d'exemples de fichiers cites au LLM pour situer le contexte.
-EXEMPLES_FICHIERS = 3
+# Separateur employe par les analyseurs entre le constat generique et son
+# illustration : "dependance sans version figee : fastapi".
+SEPARATEUR_EXEMPLE = " : "
 
 # Ordre de traitement des groupes : les regles critiques d'abord. Si le
 # quota s'epuise en cours de route, ce sont les violations les plus graves
@@ -65,23 +67,27 @@ SEVERITE_INCONNUE = 2
 # Gabarit du prompt. Les accolades du JSON attendu sont doublees :
 # ce gabarit passe par str.format().
 #
-# Le prompt demande explicitement un texte valable pour tous les fichiers
-# concernes : la reponse sera recopiee sur chaque violation du groupe, elle
-# ne doit donc pas s'appuyer sur un fichier en particulier.
+# La reponse est recopiee sur chaque violation du groupe : elle doit donc
+# valoir pour la regle entiere. Aucun nom de fichier ni de dependance n'est
+# transmis au modele — lui donner "fastapi" en exemple produisait une
+# explication sur fastapi, servie ensuite a quarante violations qui
+# concernaient d'autres paquets.
 PROMPT_EXPLICATION = """
 Tu es un expert en gouvernance IT.
-Regle violee : {regle_nom}
-Probleme constate : {probleme}
-Nombre de fichiers concernes : {nombre}
-Exemples de fichiers : {fichiers}
 
-Ton explication et ta correction doivent valoir pour TOUS les fichiers
-concernes : ne cite aucun fichier en particulier.
+Regle violee : {regle_nom}
+Severite : {severite}
+Description de la violation : {probleme_generique}
+
+Genere une explication GENERALE de cette regle et une correction
+applicable a tous les cas. Ne cite aucun fichier, aucune dependance ni
+aucune valeur particuliere : ton texte sera affiche pour l'ensemble des
+violations de cette regle.
 
 Reponds UNIQUEMENT avec ce JSON :
 {{
-  "explication": "2 phrases max",
-  "correction": "correction concrete"
+  "explication": "2 phrases generales sur pourquoi cette regle est importante",
+  "correction": "correction generale applicable a tous les cas de cette regle"
 }}
 """
 
@@ -223,13 +229,11 @@ class ExplainViolations:
         # Le premier element sert de specimen : meme regle, donc meme
         # nature de probleme pour tout le groupe.
         exemple = groupe[0]
-        fichiers = [v.fichier for v in groupe[:EXEMPLES_FICHIERS]]
 
         prompt = PROMPT_EXPLICATION.format(
             regle_nom=exemple.regle_nom,
-            probleme=exemple.probleme,
-            nombre=len(groupe),
-            fichiers=", ".join(fichiers),
+            severite=exemple.severite,
+            probleme_generique=self._probleme_generique(exemple),
         )
 
         donnees = self.llm.extraire_json(self.llm.invoquer(prompt))
@@ -251,6 +255,35 @@ class ExplainViolations:
         for violation in groupe:
             violation.explication = explication
             violation.correction = correction
+
+    def _probleme_generique(self, violation) -> str:
+        """Decrit la regle violee, sans l'illustration du cas particulier.
+
+        Trois sources, de la plus generale a la plus specifique :
+
+          1. la description de la Golden Rule dans le referentiel, qui est
+             deja redigee au niveau de la regle ;
+          2. a defaut, le constat de l'analyseur ampute de son exemple :
+             "dependance sans version figee : fastapi" devient
+             "dependance sans version figee" ;
+          3. en dernier recours, le nom de la regle.
+
+        Args:
+            violation: le specimen du groupe.
+
+        Returns:
+            Une description exploitable par le LLM.
+        """
+        regle = get_rule_by_id(violation.regle_id)
+        if regle and regle.description:
+            return regle.description
+
+        probleme = (violation.probleme or "").strip()
+        if SEPARATEUR_EXEMPLE in probleme:
+            # Ne garder que la partie avant l'illustration.
+            return probleme.split(SEPARATEUR_EXEMPLE, 1)[0].strip()
+
+        return probleme or violation.regle_nom
 
     def _champ(self, donnees: dict, cle: str) -> str:
         """Lit un champ texte de la reponse du LLM.
